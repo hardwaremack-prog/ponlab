@@ -83,7 +83,7 @@ td.note{white-space:normal;color:var(--dim)}
 <header>
   <h1>PON<span>LAB</span></h1>
   <span id="mode" class="badge sim">…</span>
-  <span class="cmeter">AMI outage &amp; supercap holdup tester</span>
+  <span class="cmeter"><b id="node" style="color:var(--ink)"></b> · AMI outage &amp; supercap holdup tester</span>
   <span class="clock" id="clock"></span>
   <button class="estop" onclick="restoreAll()">⏻ RESTORE ALL</button>
 </header>
@@ -120,8 +120,11 @@ const fmt=s=>{if(s==null)return'—';s=Math.max(0,s);const m=Math.floor(s/60),h=
   const sec=(s%60).toFixed(1).padStart(4,'0');return h?`${h}:${String(m%60).padStart(2,'0')}:${sec}`:`${String(m).padStart(2,'0')}:${sec}`};
 const tstr=t=>new Date(t*1000).toLocaleTimeString([], {hour12:false})+'.'+String(Math.floor((t%1)*10));
 function toast(m){const t=$('#toast');t.textContent=m;t.classList.add('show');clearTimeout(t._h);t._h=setTimeout(()=>t.classList.remove('show'),1800)}
-async function post(url,body){const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})});
-  const j=await r.json().catch(()=>({}));if(!r.ok)toast(j.error||'Error');poll();return j}
+let TOKEN='';try{TOKEN=localStorage.getItem('ponlab-token')||''}catch(e){}
+async function post(url,body,retry){const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-PonLab-Token':TOKEN},body:JSON.stringify(body||{})});
+  const j=await r.json().catch(()=>({}));
+  if(r.status===401&&!retry){const t=prompt('This PON Lab needs its access token:');if(t){TOKEN=t.trim();try{localStorage.setItem('ponlab-token',TOKEN)}catch(e){}return post(url,body,true)}}
+  if(!r.ok)toast(j.error||'Error');poll();return j}
 
 function build(){
   const g=$('#grid'); g.innerHTML='';
@@ -164,7 +167,7 @@ function build(){
 }
 
 function render(){
-  const m=$('#mode'); m.textContent=S.sim?'SIMULATION':'LIVE GPIO'; m.className='badge '+(S.sim?'sim':'live');
+  const m=$('#mode'); m.textContent=S.sim?'SIMULATION':'LIVE GPIO'; $('#node').textContent=S.node||''; m.className='badge '+(S.sim?'sim':'live');
   S.channels.forEach(c=>{
     const el=$('#c-'+c.id), q=r=>el.querySelector(`[data-r="${r}"]`), out=!c.powered;
     el.classList.toggle('out',out);

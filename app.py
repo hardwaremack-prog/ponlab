@@ -14,6 +14,7 @@ the dashboard on any PC.
 """
 import csv
 import io
+import socket
 import json
 import os
 import threading
@@ -24,13 +25,17 @@ from datetime import datetime
 from flask import Flask, jsonify, request, send_from_directory, Response
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(BASE, "config.json")
-DATA_DIR = os.path.join(BASE, "data")
+CONFIG_PATH = os.environ.get("PONLAB_CONFIG") or os.path.join(BASE, "config.json")
+DATA_DIR = os.environ.get("PONLAB_DATA") or os.path.join(BASE, "data")
 LOG_PATH = os.path.join(DATA_DIR, "events.jsonl")
 os.makedirs(DATA_DIR, exist_ok=True)
 
 with open(CONFIG_PATH) as f:
     CONFIG = json.load(f)
+
+VERSION = "1.1"
+NODE_NAME = CONFIG.get("node_name") or socket.gethostname()
+API_TOKEN = os.environ.get("PONLAB_TOKEN") or CONFIG.get("api_token") or ""
 
 # ---------------------------------------------------------------- hardware
 SIM = False
@@ -112,7 +117,7 @@ def log(channel, kind, note="", **extra):
 
 
 # ------------------------------------------------------------- operations
-def cut(ch, duration=None, reason="manual"):
+def cut(ch, duration=None, reason="manual", **extra):
     with lock:
         r = relays[ch]
         if not r.powered:
@@ -125,10 +130,10 @@ def cut(ch, duration=None, reason="manual"):
         max_s = CONFIG.get("max_outage_seconds", 3600)
         dur = min(duration, max_s) if duration else max_s
         s["restore_at"] = s["outage_started"] + dur
-        log(ch, "power_off", reason, planned_seconds=duration)
+        log(ch, "power_off", reason, planned_seconds=duration, **extra)
 
 
-def restore(ch, reason="manual"):
+def restore(ch, reason="manual", **extra):
     with lock:
         r = relays[ch]
         if r.powered:
@@ -145,7 +150,7 @@ def restore(ch, reason="manual"):
         s["last_result"] = result
         s["outage_started"] = None
         s["restore_at"] = None
-        log(ch, "power_on", reason, **result)
+        log(ch, "power_on", reason, **result, **extra)
 
 
 def mark(ch, kind, note=""):
@@ -158,13 +163,13 @@ def mark(ch, kind, note=""):
         return log(ch, "mark:" + kind, note, seconds_into_outage=rel)
 
 
-def run_sequence(ch, steps, name):
+def run_sequence(ch, steps, name, **extra):
     """steps: list of {"off": seconds, "on": seconds}"""
     seq_id = uuid.uuid4().hex[:6]
     with lock:
         state[ch]["sequence"] = {"id": seq_id, "name": name, "step": 0,
                                  "total": len(steps), "phase": "starting"}
-    log(ch, "sequence_start", name, steps=steps)
+    log(ch, "sequence_start", name, steps=steps, **extra)
 
     def worker():
         for i, st in enumerate(steps):
@@ -172,10 +177,10 @@ def run_sequence(ch, steps, name):
             if not seq or seq["id"] != seq_id:
                 return  # aborted
             seq.update(step=i + 1, phase="off", phase_ends=time.time() + st["off"])
-            cut(ch, st["off"], reason=f"{name} step {i+1}/{len(steps)}")
+            cut(ch, st["off"], reason=f"{name} step {i+1}/{len(steps)}", **extra)
             if not _sleep_while(ch, seq_id, st["off"]):
                 return
-            restore(ch, reason=f"{name} step {i+1}/{len(steps)}")
+            restore(ch, reason=f"{name} step {i+1}/{len(steps)}", **extra)
             seq.update(phase="on", phase_ends=time.time() + st["on"])
             if not _sleep_while(ch, seq_id, st["on"]):
                 return
@@ -204,6 +209,43 @@ def abort_sequence(ch):
     restore(ch, reason="sequence aborted")
 
 
+def run_at(at, fn):
+    """Run fn at epoch time `at` on this Pi's clock (now if missing/past).
+    Coarse sleep, then a short spin so many Pis switch within a few ms."""
+    if not at or at <= time.time():
+        fn()
+        return
+    def waiter():
+        while True:
+            left = at - time.time()
+            if left <= 0:
+                break
+            time.sleep(left - 0.02 if left > 0.03 else 0.0005)
+        fn()
+    threading.Thread(target=waiter, daemon=True).start()
+
+
+def do_action(a, run=None):
+    ch = a.get("ch")
+    if ch not in relays:
+        return
+    extra = {"run": run} if run else {}
+    op = a.get("op")
+    if op == "off":
+        if not state[ch]["sequence"]:
+            cut(ch, a.get("seconds"), reason=a.get("reason", "fleet"), **extra)
+    elif op == "on":
+        if state[ch]["sequence"]:
+            abort_sequence(ch)
+        else:
+            restore(ch, reason=a.get("reason", "fleet"), **extra)
+    elif op == "sequence":
+        if not state[ch]["sequence"] and relays[ch].powered:
+            run_sequence(ch, a["steps"], a.get("name", "fleet"), **extra)
+    elif op == "mark":
+        mark(ch, a.get("kind", "note"), a.get("note", ""))
+
+
 def watchdog():
     """Auto-restore timed outages, enforce max outage, watch sense inputs."""
     while True:
@@ -215,7 +257,7 @@ def watchdog():
                     restore(ch, reason="timer / max-outage limit")
             if not r.powered and s["sense_dark_at"] is None and r.sense_alive() is False:
                 s["sense_dark_at"] = now
-                log(ch, "sense_dark", "sense input went dark (caps exhausted?)",
+                log(ch, "sense_dark", "sense input went dark",
                     seconds_into_outage=round(now - s["outage_started"], 2))
         time.sleep(0.05)
 
@@ -224,6 +266,21 @@ threading.Thread(target=watchdog, daemon=True).start()
 
 # ------------------------------------------------------------------- web
 app = Flask(__name__, static_folder="static")
+
+
+@app.before_request
+def check_token():
+    # Optional shared token so only your fleet server / people with it can switch relays
+    if API_TOKEN and request.method == "POST" and request.path.startswith("/api/"):
+        if request.headers.get("X-PonLab-Token") != API_TOKEN:
+            return jsonify(ok=False, error="token required"), 401
+
+
+@app.after_request
+def cors(resp):
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type, X-PonLab-Token"
+    return resp
 
 
 @app.get("/")
@@ -258,17 +315,36 @@ def api_state():
                                                "phase_left": round(s["sequence"].get("phase_ends", now) - now, 1)},
                 "last_result": s["last_result"],
             })
-    return jsonify({"sim": SIM, "now": now, "channels": out,
+    since = request.args.get("since", type=float)
+    evs = [e for e in events if e["t"] > since][-500:] if since else events[-200:]
+    return jsonify({"sim": SIM, "now": now, "channels": out, "node": NODE_NAME,
+                    "version": VERSION, "token_required": bool(API_TOKEN),
                     "presets": CONFIG.get("presets", []),
                     "mark_types": CONFIG.get("mark_types", []),
                     "max_outage_seconds": CONFIG.get("max_outage_seconds", 3600),
-                    "events": events[-200:][::-1]})
+                    "events": evs[::-1]})
+
+
+@app.get("/api/time")
+def api_time():
+    return jsonify(t=time.time(), node=NODE_NAME, version=VERSION)
+
+
+@app.post("/api/batch")
+def api_batch():
+    """Used by PON Fleet: {"at": epoch, "run": "id", "actions": [{"ch","op",...}]}
+    All actions fire together at `at` (this Pi's clock)."""
+    d = request.get_json(silent=True) or {}
+    acts = d.get("actions", [])
+    run = d.get("run")
+    run_at(d.get("at"), lambda: [do_action(a, run) for a in acts])
+    return jsonify(ok=True, scheduled_for=d.get("at"), now=time.time(), count=len(acts))
 
 
 @app.post("/api/<ch>/off")
 def api_off(ch):
     d = request.get_json(silent=True) or {}
-    cut(ch, d.get("seconds"), reason=d.get("reason", "manual"))
+    run_at(d.get("at"), lambda: cut(ch, d.get("seconds"), reason=d.get("reason", "manual")))
     return jsonify(ok=True)
 
 
@@ -337,7 +413,8 @@ def clear_log():
 
 
 if __name__ == "__main__":
-    print(f"PON Lab starting ({'SIMULATION' if SIM else 'GPIO'} mode)")
+    print(f"PON Lab {VERSION} '{NODE_NAME}' starting ({'SIMULATION' if SIM else 'GPIO'} mode)"
+          + (" with access token" if API_TOKEN else ""))
     port = int(os.environ.get("PONLAB_PORT", CONFIG.get("port", 8080)))
     if "--open" in os.sys.argv:
         import webbrowser

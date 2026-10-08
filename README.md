@@ -22,7 +22,7 @@ test through relays, so you can measure:
 # copy the ponlab folder to the Pi, then:
 cd ponlab
 chmod +x install.sh
-sudo ./install.sh
+sudo ./install.sh waveshare-8ch   # 8-ch relay HAT  (or: sudo ./install.sh  for the 4-ch module)
 ```
 
 Open `http://<pi-ip>:8080` from any browser on the network.
@@ -56,32 +56,31 @@ Built-in sequences (edit in `config.json`):
 | Recloser (3 shots) | Reclosing pattern; checks PON suppression and restore behaviour |
 | Flicker ×10 | Rapid cycling; checks for missed or duplicate notices |
 
-## Wiring
+## Hardware and wiring
 
-```
-Pi GPIO17 ─► relay board IN1   (B=27, C=22, D=23)
-Pi 5V/GND ─► relay board VCC/GND
+**Full parts list and step-by-step wiring: [HARDWARE.md](HARDWARE.md)**
 
-LINE ─► contactor COM ─► NC contact ─► meter socket line side
-              ▲
-     contactor coil driven by relay channel
-```
+[![Wiring diagram](docs/wiring.png)](HARDWARE.md)
 
-- **Use the NC (normally-closed) contact** — `"wiring": "NC"` in config. Energizing
-  the relay = outage. If the Pi crashes, reboots or loses power, the meter goes
-  back on automatically.
-- Most cheap relay boards are **active-low** (`"relay_active_high": false`). If a
-  channel works backwards, flip that setting.
-- `max_outage_seconds` (default 3600) is a hard limit enforced on the Pi — power is
-  restored even if the browser is closed.
-- **RESTORE ALL** in the header puts every channel back on.
+In short:
+- Use an **8-channel relay HAT** (Waveshare RPi Relay Board (B)), one channel per meter.
+- Each relay switches the **24 VAC coil of a 2-pole contactor**. The contactor switches L1 and L2 to the meter socket.
+- Wire the coil through the relay's **NC** terminal. Then if the Pi is off or crashes, the meter stays powered.
+- `max_outage_seconds` (default 3600) is a hard limit enforced on the Pi, so power is
+  restored even if the browser is closed. **RESTORE ALL** turns every channel back on.
+- Optional `sense_gpio` per channel: an opto-isolated AC voltage sense module logs
+  the exact moment the line went dead.
 
-### Optional automatic "caps out" detection
+## Many Pis, up to 16 meters at once
 
-Set `sense_gpio` on a channel and wire an optocoupler or photo-sensor (e.g. on the
-meter's display backlight or optical-port LED) so the input is pulled **low while
-the meter is alive**. The dashboard logs *sense dark* the moment it drops — an
-automatic holdup time with no stopwatch.
+Use **[PON Fleet](https://github.com/hardwaremack-prog/ponfleet)**. It adds Pis by IP
+address (or scans the network) and cuts up to 16 meters across any number of Pis
+at the same moment. It also reports how closely the cuts lined up and combines
+every Pi's results into one table.
+
+For fleet use, set in each Pi's `config.json`:
+- `node_name` is the site name shown in PON Fleet.
+- `api_token` is a shared password. Only requests that carry it can switch relays.
 
 ## Safety — please read
 
@@ -99,7 +98,9 @@ commercial forms) with high available fault current.
 
 - `app.py` — backend (Flask + gpiozero), watchdog, timers, sequences, logging
 - `static/index.html` — the dashboard
-- `config.json` — channels, GPIO pins, presets, mark buttons
+- `config.json` — channels, GPIO pins, presets, mark buttons (generic 4-ch module)
+- `config.waveshare-8ch.json` — same for the Waveshare 8-ch relay HAT
+- `HARDWARE.md`, `docs/wiring.svg` — parts and wiring
 - `data/events.jsonl` — permanent event log (survives restarts)
 - `Try PON Lab (simulation).bat` / `try-sim.sh` — run with no hardware
 - `install.sh` — installs packages and a systemd service that starts on boot
