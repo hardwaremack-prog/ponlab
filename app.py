@@ -231,6 +231,14 @@ def index():
     return send_from_directory("static", "index.html")
 
 
+@app.get("/pl.js")
+def probe_js():
+    # lets the My Apps menu tile find a running PON Lab without opening the wrong app
+    port = request.host.split(":")[-1] if ":" in request.host else "80"
+    return Response(f"window.__ponlab=(window.__ponlab||[]).concat([{port}]);",
+                    mimetype="application/javascript", headers={"Cache-Control": "no-store"})
+
+
 @app.get("/api/state")
 def api_state():
     now = time.time()
@@ -329,5 +337,9 @@ def clear_log():
 
 
 if __name__ == "__main__":
-    print(f"PON Lab starting ({'SIMULATION' if SIM else 'GPIO'} mode) on port {CONFIG.get('port', 8080)}")
-    app.run(host="0.0.0.0", port=CONFIG.get("port", 8080), threaded=True)
+    print(f"PON Lab starting ({'SIMULATION' if SIM else 'GPIO'} mode)")
+    port = int(os.environ.get("PONLAB_PORT", CONFIG.get("port", 8080)))
+    if "--open" in os.sys.argv:
+        import webbrowser
+        threading.Timer(1.5, lambda: webbrowser.open(f"http://127.0.0.1:{port}/")).start()
+    app.run(host="0.0.0.0", port=port, threaded=True)
